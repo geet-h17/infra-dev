@@ -14,7 +14,7 @@ The workflow consists of four steps:
 - Upload GitLeaks report: Uploads the GitLeaks report as an artifact named gitleaks-report.json using the actions/upload-artifact@v3 action.
 
 ### Sample Code
-A sample Python file send_sms.py is provided to demonstrate how to use a Twilio API key to send an SMS message.
+A sample Python file py is provided to demonstrate how to use a Twilio API key to send an SMS message.
 
 ### Testing the GitLeaks Scan Workflow
 
@@ -24,3 +24,5 @@ A sample Python file send_sms.py is provided to demonstrate how to use a Twilio 
 - Commit and push changes to trigger the workflow.
 - Check the workflow logs for errors.
 - Verify the gitleaks-report.json artifact contains the expected results.
+
+You can look up the results on this repo  -[GitHub Action Runner](https://github.com/geet-h17/tester/actions/runs/10684220184)
