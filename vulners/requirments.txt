@@ -1,0 +1,2 @@
+vulners==2.2.0
+requests==2.32.3

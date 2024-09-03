@@ -1,4 +1,4 @@
-# twilio-gitleaks.toml
+
 [[rules]]
 id = "twilio-api-key"
 description = "Found a Twilio API Key, posing a risk to communication services and sensitive customer interaction data."
