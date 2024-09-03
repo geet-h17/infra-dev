@@ -20,7 +20,7 @@ A sample Python file send_sms.py is provided to demonstrate how to use a Twilio 
 
 **To test the workflow:**
 
-- Create a test branch and update send_sms.py with a valid Twilio API key.
+- Create a test branch and update py script with a valid Twilio API key.
 - Commit and push changes to trigger the workflow.
 - Check the workflow logs for errors.
 - Verify the gitleaks-report.json artifact contains the expected results.
